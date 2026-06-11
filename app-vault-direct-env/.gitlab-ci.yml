@@ -1,0 +1,28 @@
+deploy:
+  stage: deploy
+  before_script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | base64 -d | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H $PROD_HOST >> ~/.ssh/known_hosts
+  script:
+    - scp -P ${PROD_PORT:-22} -r Dockerfile server.js package.json $PROD_USER@$PROD_HOST:~/app-vault-sdk-env
+    - |
+      ssh -p ${PROD_PORT:-22} $PROD_USER@$PROD_HOST bash << EOF
+      set -e
+      cd ~/app-vault-sdk-env
+      docker build -t app-vault-sdk-env:latest .
+      docker rm -f app-vault-sdk-env 2>/dev/null || true
+      docker run -d \
+        --name app-vault-sdk-env \
+        --restart unless-stopped \
+        -p 84:84 \
+        --add-host vault.elnurbda.com:10.10.1.8 \
+        -e VAULT_ADDR=http://vault.elnurbda.com:8200 \
+        -e VAULT_ROLE_ID=${VAULT_APPROLE_ROLE_ID} \
+        -e VAULT_SECRET_ID=${VAULT_APPROLE_SECRET_ID} \
+        -e VAULT_SECRET_PATH=secret/data/app-vault-sdk-env/prod \
+        app-vault-sdk-env:latest
+      docker image prune -f
+      docker ps --filter name=app-vault-sdk-env
+      EOF

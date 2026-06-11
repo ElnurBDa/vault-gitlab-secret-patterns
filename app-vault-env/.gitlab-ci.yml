@@ -1,0 +1,61 @@
+# .gitlab-ci.yml
+deploy:
+  stage: deploy
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "https://gitlab.elnurbda.com"
+  before_script:
+    # --- Vault auth (JWT primary, AppRole fallback) ---
+    - |
+      echo "==> Fetching vault binary..."
+      export VAULT_SKIP_VERIFY=true
+      
+      echo "==> Attempting JWT auth..."
+      VAULT_TOKEN=$(curl -sf \
+        --data "{\"jwt\":\"${VAULT_ID_TOKEN}\",\"role\":\"gitlab-ci\"}" \
+        ${VAULT_ADDR}/v1/auth/jwt/login | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4) || true
+
+      if [ -z "$VAULT_TOKEN" ]; then
+        echo "==> JWT failed, falling back to AppRole..."
+        VAULT_TOKEN=$(curl -sf \
+          --data "{\"role_id\":\"${VAULT_APPROLE_ROLE_ID}\",\"secret_id\":\"${VAULT_APPROLE_SECRET_ID}\"}" \
+          ${VAULT_ADDR}/v1/auth/approle/login | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4)
+      fi
+
+      [ -z "$VAULT_TOKEN" ] && echo "ERROR: Vault auth failed" && exit 1
+      export VAULT_TOKEN
+      echo "==> Vault auth successful"
+
+    # --- Read secrets ---
+    - |
+      SECRETS=$(curl -sf \
+        -H "X-Vault-Token: ${VAULT_TOKEN}" \
+        ${VAULT_ADDR}/v1/secret/data/app-vault-env/prod)
+      export APP_USERNAME=$(echo $SECRETS | grep -o '"APP_USERNAME":"[^"]*"' | cut -d'"' -f4)
+      export APP_PASSWORD=$(echo $SECRETS | grep -o '"APP_PASSWORD":"[^"]*"' | cut -d'"' -f4)
+
+    # --- SSH setup ---
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | base64 -d | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H $PROD_HOST >> ~/.ssh/known_hosts
+
+  script:
+    - scp -P ${PROD_PORT:-22} -r Dockerfile server.js package.json $PROD_USER@$PROD_HOST:~/env-debug-3
+    - |
+      ssh -p ${PROD_PORT:-22} $PROD_USER@$PROD_HOST bash << EOF
+      set -e
+      mkdir -p env-debug-3
+      cd env-debug-3
+      docker build -t env-debug-3:latest .
+      docker rm -f env-debug-3 2>/dev/null || true
+      docker run -d \
+        --name env-debug-3 \
+        --restart unless-stopped \
+        -p 82:82 \
+        -e USERNAME=$APP_USERNAME \
+        -e PASSWORD=$APP_PASSWORD \
+        env-debug-3:latest
+      docker image prune -f
+      docker ps --filter name=env-debug-3
+      EOF

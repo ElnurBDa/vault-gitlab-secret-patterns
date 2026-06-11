@@ -1,0 +1,27 @@
+deploy:
+  stage: deploy
+  before_script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | base64 -d | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -H $PROD_HOST >> ~/.ssh/known_hosts
+  script:
+    - scp -P ${PROD_PORT:-22} -r Dockerfile server.js package.json $PROD_USER@$PROD_HOST:~/env-debug
+    - |
+      ssh -p ${PROD_PORT:-22} $PROD_USER@$PROD_HOST bash << EOF
+      set -e
+      mkdir -p env-debug
+      cd env-debug
+      echo "USERNAME=$APP_USERNAME" > .env
+      echo "PASSWORD=$APP_PASSWORD" >> .env
+      docker build -t env-debug:latest .
+      docker rm -f env-debug 2>/dev/null || true
+      docker run -d \
+        --name env-debug \
+        --restart unless-stopped \
+        -p 80:80 \
+        --env-file .env \
+        env-debug:latest
+      docker image prune -f
+      docker ps --filter name=env-debug
+      EOF
