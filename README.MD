@@ -1,4 +1,27 @@
-# Setup
+# Vault + GitLab Secret Patterns
+
+A hands-on lab comparing **five ways to deliver secrets** to a deployed app with **GitLab CI/CD** and **OpenBao** (an open-source fork of HashiCorp Vault), backed by a small self-hosted environment on Azure. The same tiny app is deployed five times; the only thing that changes is how its `USERNAME` / `PASSWORD` reaches it — from a plaintext `.env` file all the way to live fetches from OpenBao.
+
+> 📝 **Full write-up:** [Secret Management with OpenBao and GitLab CI/CD](https://elnurbda.com/posts/59-openbao-gitlab)
+
+## What's inside
+
+| Directory | Port | Secret delivery |
+|---|---|---|
+| [`app-traditional-env`](app-traditional-env) | 80 | GitLab CI variables → `.env` file on prod |
+| [`app-better-env`](app-better-env) | 81 | GitLab CI variables → container env (`-e`) |
+| [`app-vault-env`](app-vault-env) | 82 | OpenBao, fetched in CI (JWT → AppRole) |
+| [`app-vault-agent-env`](app-vault-agent-env) | 83 | OpenBao via a Vault Agent → tmpfs `--env-file` |
+| [`app-vault-direct-env`](app-vault-direct-env) | 84 | OpenBao, fetched live by the app on every request |
+
+Infrastructure:
+
+- [`azure_env_setup.sh`](azure_env_setup.sh) — provisions the five Azure VMs (proxy, GitLab, runner, OpenBao, prod)
+- The setup guide below — GitLab, GitLab Runner, OpenBao, and the integration wiring
+
+## Setup
+
+The full step-by-step setup follows — work top to bottom, each host builds on the previous one.
 
 ## On your machine
 
