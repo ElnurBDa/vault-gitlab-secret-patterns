@@ -1,6 +1,6 @@
 # Vault + GitLab Secret Patterns
 
-A hands-on lab comparing **five ways to deliver secrets** to a deployed app with **GitLab CI/CD** and **OpenBao** (an open-source fork of HashiCorp Vault), backed by a small self-hosted environment on Azure. The same tiny app is deployed five times; the only thing that changes is how its `USERNAME` / `PASSWORD` reaches it — from a plaintext `.env` file all the way to live fetches from OpenBao.
+A hands-on lab comparing **five ways to deliver secrets** to a deployed app with **GitLab CI/CD** and **OpenBao** (an open-source fork of HashiCorp Vault), backed by a small self-hosted environment on Azure. The same tiny app is deployed five times; the only thing that changes is how its `APP_USERNAME` / `APP_PASSWORD` reaches it — from a plaintext `.env` file all the way to live fetches from OpenBao.
 
 > 📝 **Full write-up:** [Secret Management with OpenBao and GitLab CI/CD](https://elnurbda.com/posts/59-openbao-gitlab)
 
@@ -10,7 +10,7 @@ A hands-on lab comparing **five ways to deliver secrets** to a deployed app with
 |---|---|---|
 | [`app-traditional-env`](app-traditional-env) | 80 | GitLab CI variables → `.env` file on prod |
 | [`app-better-env`](app-better-env) | 81 | GitLab CI variables → container env (`-e`) |
-| [`app-vault-env`](app-vault-env) | 82 | OpenBao, fetched in CI (JWT → AppRole) |
+| [`app-vault-env`](app-vault-env) | 82 | OpenBao, fetched in CI (JWT/OIDC) |
 | [`app-vault-agent-env`](app-vault-agent-env) | 83 | OpenBao via a Vault Agent → tmpfs `--env-file` |
 | [`app-vault-direct-env`](app-vault-direct-env) | 84 | OpenBao, fetched live by the app on every request |
 
@@ -118,7 +118,6 @@ services:
       - "0.0.0.0:8201:8201"
     environment:
       - VAULT_ADDR=http://vault.elnurbda.com:8200
-      - VAULT_DISABLE_MLOCK=true
     healthcheck:
       interval: 2s
       retries: 10
@@ -173,54 +172,62 @@ max_lease_ttl     = "720h"   # 30 days
 
 ### OpenBao setup
 
-Run after init and unseal:
+Two auth methods, because two kinds of client log in: CI jobs use **JWT/OIDC**, prod
+workloads (the Vault Agent and the SDK app) use **AppRole**. Each gets a policy scoped to
+one app's single path — never a blanket `secret/data/*`. Run after init and unseal:
 
 ```bash
-# Enable JWT auth
-docker compose exec openbao bao auth enable jwt
+# KV v2 for app secrets
+docker compose exec openbao bao secrets enable -path=secret kv-v2
 
-# Configure GitLab as OIDC provider
-# jwks_url confirmed at: https://gitlab.elnurbda.com/oauth/discovery/keys
+# --- JWT auth: trust GitLab's OIDC tokens (CI jobs authenticate this way) ---
 # jwks_ca_pem required because GitLab uses a self-signed cert
+docker compose exec openbao bao auth enable jwt
 docker compose exec openbao bao write auth/jwt/config \
   jwks_url="https://gitlab.elnurbda.com/oauth/discovery/keys" \
   bound_issuer="https://gitlab.elnurbda.com" \
   jwks_ca_pem=@/openbao/config/gitlab.pem
 
-# Policy
-cat > /tmp/ci-read.hcl << 'EOF'
-path "secret/data/*" {
+# One policy + one role PER project, each scoped to that project's single path
+# (shown for app-vault-env; repeat for the other projects).
+cat > /tmp/app-vault-env.hcl << 'EOF'
+path "secret/data/app-vault-env/prod" {
   capabilities = ["read"]
 }
 EOF
-docker compose exec -T openbao bao policy write ci-read - < /tmp/ci-read.hcl
+docker compose exec -T openbao bao policy write app-vault-env - < /tmp/app-vault-env.hcl
 
-# JWT role (bound_audiences maps to the aud claim GitLab sets in CI JWTs)
-docker compose exec openbao bao write auth/jwt/role/gitlab-ci \
+# project_path is the project's GitLab namespace/path (e.g. root/app-vault-env), NOT the
+# OS user. bound_audiences is a distinct value, not the GitLab URL. Both must match the
+# token exactly or the login 403s.
+docker compose exec openbao bao write auth/jwt/role/app-vault-env \
   role_type="jwt" \
-  policies="ci-read" \
-  token_ttl="1h" \
-  token_max_ttl="2h" \
-  bound_audiences="https://gitlab.elnurbda.com" \
-  bound_claims_type="glob" \
-  bound_claims.project_path="*" \
-  user_claim="sub"
+  policies="app-vault-env" \
+  token_ttl="15m" \
+  token_max_ttl="30m" \
+  bound_audiences="openbao" \
+  bound_claims_type="string" \
+  bound_claims.project_path="root/app-vault-env" \
+  user_claim="project_path"
 
-# Enable AppRole (fallback)
+# --- AppRole: for prod workloads, one role + scoped policy per app ---
 docker compose exec openbao bao auth enable approle
 
-docker compose exec openbao bao write auth/approle/role/gitlab-ci \
-  policies="ci-read" \
+cat > /tmp/app-vault-agent-env.hcl << 'EOF'
+path "secret/data/app-vault-agent-env/prod" {
+  capabilities = ["read"]
+}
+EOF
+docker compose exec -T openbao bao policy write app-vault-agent-env - < /tmp/app-vault-agent-env.hcl
+
+docker compose exec openbao bao write auth/approle/role/app-vault-agent-env \
+  token_policies="app-vault-agent-env" \
   token_ttl="1h" \
-  token_max_ttl="2h" \
-  secret_id_ttl="0"
+  token_max_ttl="4h"
 
-# Enable KV v2
-docker compose exec openbao bao secrets enable -path=secret kv-v2
-
-# Get AppRole credentials (store in GitLab CI variables)
-docker compose exec openbao bao read auth/approle/role/gitlab-ci/role-id
-docker compose exec openbao bao write -f auth/approle/role/gitlab-ci/secret-id
+# role-id + a response-wrapped secret-id (the raw value never lands in logs/history)
+docker compose exec openbao bao read auth/approle/role/app-vault-agent-env/role-id
+docker compose exec openbao bao write -f -wrap-ttl=120s auth/approle/role/app-vault-agent-env/secret-id
 ```
 
 ### GitLab CI variables
@@ -230,9 +237,12 @@ Set in **Settings → CI/CD → Variables**:
 | Variable | Value | Masked | Protected |
 |---|---|---|---|
 | `VAULT_ADDR` | `http://vault.elnurbda.com:8200` | | ✓ |
-| `VAULT_ROLE` | `gitlab-ci` | | |
 | `VAULT_APPROLE_ROLE_ID` | `<role-id from above>` | | ✓ |
 | `VAULT_APPROLE_SECRET_ID` | `<secret-id from above>` | ✓ | ✓ |
+
+`VAULT_ADDR` is all the JWT pipeline (`app-vault-env`) needs — the role name is in the
+job, and JWT stores no Vault credential. The `VAULT_APPROLE_*` pair is only for the SDK
+app (it logs in with AppRole at runtime).
 
 Infrastructure vars (`SSH_PRIVATE_KEY`, `PROD_HOST`, `PROD_USER`, `PROD_PORT`) stay in GitLab.
 App secrets (`APP_USERNAME`, `APP_PASSWORD`, etc.) go into Vault.
@@ -255,35 +265,22 @@ deploy:
   stage: deploy
   id_tokens:
     VAULT_ID_TOKEN:
-      aud: "https://gitlab.elnurbda.com"   # must match bound_audiences in JWT role
+      aud: "openbao"   # must match bound_audiences in the JWT role
   before_script:
-    # Vault auth: JWT primary, AppRole fallback
+    - apk add --no-cache curl jq   # the docker:24 runner image is minimal
+    # Vault auth via JWT
     - |
-      echo "==> Attempting JWT auth..."
       VAULT_TOKEN=$(curl -sf \
-        --data "{\"jwt\":\"${VAULT_ID_TOKEN}\",\"role\":\"gitlab-ci\"}" \
-        ${VAULT_ADDR}/v1/auth/jwt/login \
-        | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4) || true
-
-      if [ -z "$VAULT_TOKEN" ]; then
-        echo "==> JWT failed, falling back to AppRole..."
-        VAULT_TOKEN=$(curl -sf \
-          --data "{\"role_id\":\"${VAULT_APPROLE_ROLE_ID}\",\"secret_id\":\"${VAULT_APPROLE_SECRET_ID}\"}" \
-          ${VAULT_ADDR}/v1/auth/approle/login \
-          | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4)
-      fi
-
-      [ -z "$VAULT_TOKEN" ] && echo "ERROR: Vault auth failed" && exit 1
+        --data "{\"jwt\":\"${VAULT_ID_TOKEN}\",\"role\":\"app-vault-env\"}" \
+        ${VAULT_ADDR}/v1/auth/jwt/login | jq -r '.auth.client_token')
+      if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then echo "ERROR: Vault auth failed"; exit 1; fi
       export VAULT_TOKEN
-      echo "==> Vault auth OK"
-
     # Read secrets
     - |
-      SECRETS=$(curl -sf \
-        -H "X-Vault-Token: ${VAULT_TOKEN}" \
+      SECRETS=$(curl -sf -H "X-Vault-Token: ${VAULT_TOKEN}" \
         ${VAULT_ADDR}/v1/secret/data/<app-name>/prod)
-      export APP_USERNAME=$(echo $SECRETS | grep -o '"APP_USERNAME":"[^"]*"' | cut -d'"' -f4)
-      export APP_PASSWORD=$(echo $SECRETS | grep -o '"APP_PASSWORD":"[^"]*"' | cut -d'"' -f4)
+      export APP_USERNAME=$(echo "$SECRETS" | jq -r '.data.data.APP_USERNAME')
+      export APP_PASSWORD=$(echo "$SECRETS" | jq -r '.data.data.APP_PASSWORD')
 ```
 
 ---
@@ -316,18 +313,20 @@ dpkg -i bao_2.3.1_linux_amd64.deb
 
 ### 2. Generate a dedicated AppRole secret-id for prod
 
-Don't reuse the CI secret-id. Generate a separate one on secman:
+Generate one for the agent's own AppRole on secman (response-wrapped):
 
 ```bash
-docker compose exec openbao bao write -f auth/approle/role/gitlab-ci/secret-id
+docker compose exec openbao bao write -f -wrap-ttl=120s auth/approle/role/app-vault-agent-env/secret-id
 ```
 
 ### 3. Write credentials to disk on prod
 
 ```bash
+useradd --system --no-create-home --shell /usr/sbin/nologin vault-agent
 mkdir -p /etc/vault-agent
 echo "<role-id>"   > /etc/vault-agent/role-id
-echo "<secret-id>" > /etc/vault-agent/secret-id
+echo "<secret-id>" > /etc/vault-agent/secret-id   # agent deletes this after first read
+chown -R vault-agent:vault-agent /etc/vault-agent
 chmod 600 /etc/vault-agent/role-id /etc/vault-agent/secret-id
 ```
 
@@ -344,7 +343,7 @@ auto_auth {
     config = {
       role_id_file_path                   = "/etc/vault-agent/role-id"
       secret_id_file_path                 = "/etc/vault-agent/secret-id"
-      remove_secret_id_file_after_reading = false
+      remove_secret_id_file_after_reading = true   # read once, then delete (default)
     }
   }
 
@@ -358,13 +357,13 @@ auto_auth {
 
 template {
   contents = <<EOT
-{{ with secret "secret/data/<app-name>/prod" }}
-USERNAME={{ .Data.data.APP_USERNAME }}
-PASSWORD={{ .Data.data.APP_PASSWORD }}
+{{ with secret "secret/data/app-vault-agent-env/prod" }}
+APP_USERNAME={{ .Data.data.APP_USERNAME }}
+APP_PASSWORD={{ .Data.data.APP_PASSWORD }}
 {{ end }}
 EOT
   destination = "/run/vault-agent/app.env"
-  perms       = 0644   # world-readable so docker can read it
+  perms       = 0640   # not world-readable; the deploy user shares the group
 }
 ```
 
@@ -376,6 +375,9 @@ tmpfs /run/vault-agent tmpfs rw,noexec,nosuid,size=10m 0 0
 ```
 ```bash
 mount /run/vault-agent
+# a bare tmpfs mounts root:root, so give the vault-agent user write access:
+echo 'd /run/vault-agent 0750 vault-agent vault-agent' > /etc/tmpfiles.d/vault-agent.conf
+systemd-tmpfiles --create
 ```
 
 ### 6. systemd unit
@@ -391,7 +393,8 @@ Wants=network-online.target
 ExecStart=/usr/bin/bao agent -config=/etc/vault-agent/config.hcl
 Restart=on-failure
 RestartSec=5
-User=root
+# dedicated user, not root; add it to the docker group only if you wire up a restart hook
+User=vault-agent
 
 [Install]
 WantedBy=multi-user.target
@@ -405,6 +408,11 @@ systemctl status vault-agent
 # Verify secrets rendered
 cat /run/vault-agent/app.env
 ```
+
+> **Reboot caveat:** the token sink and the rendered `app.env` both live on tmpfs, and the
+> `secret-id` is deleted after first read — so a reboot leaves the agent with nothing to
+> authenticate with. Re-drop a fresh `secret-id` from provisioning on boot, or set
+> `remove_secret_id_file_after_reading = false` and accept it staying on disk.
 
 ### 7. Pipeline — no Vault auth needed in CI
 
@@ -445,7 +453,7 @@ journalctl -u vault-agent -f
 # "no known secret ID"     → /etc/vault-agent/secret-id missing or empty
 # "no such host"           → /etc/hosts missing vault.elnurbda.com entry,
 #                            check nsswitch.conf has 'files' before 'dns'
-# "permission denied"      → app.env perms not 0644, check template perms in config.hcl
+# "permission denied"      → app.env perms not 0640, or the deploy user isn't in the vault-agent group
 ```
 
 ---
@@ -527,6 +535,12 @@ deploy:
 
 > **Note:** `--add-host vault.elnurbda.com:10.10.1.8` is required because
 > Docker containers don't inherit the host's `/etc/hosts`.
+
+> **Note:** the `secret_id` is passed via `docker run -e`, so it shows up in
+> `docker inspect` — that's the one credential at rest in this pattern. Bound its TTL and
+> rotate it, or hand the container a response-wrapped secret-id it unwraps at boot. The app
+> caches the token and secret until the lease nearly expires, so it's not a Vault
+> round-trip on every request.
 
 ### Troubleshooting
 

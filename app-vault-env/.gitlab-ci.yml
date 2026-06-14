@@ -3,36 +3,24 @@ deploy:
   stage: deploy
   id_tokens:
     VAULT_ID_TOKEN:
-      aud: "https://gitlab.elnurbda.com"
+      aud: "openbao"   # must match bound_audiences on the JWT role
   before_script:
-    # --- Vault auth (JWT primary, AppRole fallback) ---
+    - apk add --no-cache curl jq   # the docker:24 runner image is minimal
+    # --- Vault auth via JWT ---
     - |
-      echo "==> Fetching vault binary..."
-      export VAULT_SKIP_VERIFY=true
-      
-      echo "==> Attempting JWT auth..."
       VAULT_TOKEN=$(curl -sf \
-        --data "{\"jwt\":\"${VAULT_ID_TOKEN}\",\"role\":\"gitlab-ci\"}" \
-        ${VAULT_ADDR}/v1/auth/jwt/login | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4) || true
-
-      if [ -z "$VAULT_TOKEN" ]; then
-        echo "==> JWT failed, falling back to AppRole..."
-        VAULT_TOKEN=$(curl -sf \
-          --data "{\"role_id\":\"${VAULT_APPROLE_ROLE_ID}\",\"secret_id\":\"${VAULT_APPROLE_SECRET_ID}\"}" \
-          ${VAULT_ADDR}/v1/auth/approle/login | grep -o '"client_token":"[^"]*"' | cut -d'"' -f4)
-      fi
-
-      [ -z "$VAULT_TOKEN" ] && echo "ERROR: Vault auth failed" && exit 1
+        --data "{\"jwt\":\"${VAULT_ID_TOKEN}\",\"role\":\"app-vault-env\"}" \
+        ${VAULT_ADDR}/v1/auth/jwt/login | jq -r '.auth.client_token')
+      if [ -z "$VAULT_TOKEN" ] || [ "$VAULT_TOKEN" = "null" ]; then echo "ERROR: Vault auth failed"; exit 1; fi
       export VAULT_TOKEN
-      echo "==> Vault auth successful"
 
     # --- Read secrets ---
     - |
       SECRETS=$(curl -sf \
         -H "X-Vault-Token: ${VAULT_TOKEN}" \
         ${VAULT_ADDR}/v1/secret/data/app-vault-env/prod)
-      export APP_USERNAME=$(echo $SECRETS | grep -o '"APP_USERNAME":"[^"]*"' | cut -d'"' -f4)
-      export APP_PASSWORD=$(echo $SECRETS | grep -o '"APP_PASSWORD":"[^"]*"' | cut -d'"' -f4)
+      export APP_USERNAME=$(echo "$SECRETS" | jq -r '.data.data.APP_USERNAME')
+      export APP_PASSWORD=$(echo "$SECRETS" | jq -r '.data.data.APP_PASSWORD')
 
     # --- SSH setup ---
     - eval $(ssh-agent -s)
@@ -53,8 +41,8 @@ deploy:
         --name env-debug-3 \
         --restart unless-stopped \
         -p 82:82 \
-        -e USERNAME=$APP_USERNAME \
-        -e PASSWORD=$APP_PASSWORD \
+        -e APP_USERNAME=$APP_USERNAME \
+        -e APP_PASSWORD=$APP_PASSWORD \
         env-debug-3:latest
       docker image prune -f
       docker ps --filter name=env-debug-3

@@ -18,8 +18,8 @@ deploy:
         --name env-debug-2 \
         --restart unless-stopped \
         -p 81:81 \
-        -e USERNAME=$APP_USERNAME \
-        -e PASSWORD=$APP_PASSWORD \
+        -e APP_USERNAME=$APP_USERNAME \
+        -e APP_PASSWORD=$APP_PASSWORD \
         env-debug-2:latest
       docker image prune -f
       docker ps --filter name=env-debug-2

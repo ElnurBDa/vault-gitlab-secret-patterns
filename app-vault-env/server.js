@@ -2,8 +2,8 @@ const express = require('express');
 const app = express();
 const PORT = 82;
 
-const USERNAME = process.env.USERNAME || '(not set)';
-const PASSWORD = process.env.PASSWORD || '(not set)';
+const APP_USERNAME = process.env.APP_USERNAME || '(not set)';
+const APP_PASSWORD = process.env.APP_PASSWORD || '(not set)';
 
 app.get('/', (req, res) => {
 	res.send(`<!DOCTYPE html>
@@ -115,14 +115,14 @@ app.get('/', (req, res) => {
       <span>env-debug · port ${PORT}</span>
     </div>
     <div class="body">
-      <div class="prompt">$ printenv | grep -E 'USERNAME|PASSWORD'</div>
+      <div class="prompt">$ printenv | grep -E 'APP_USERNAME|APP_PASSWORD'</div>
       <div class="row">
-        <span class="label">USERNAME</span>
-        <span class="value ${USERNAME === '(not set)' ? 'unset' : ''}">${USERNAME}</span>
+        <span class="label">APP_USERNAME</span>
+        <span class="value ${APP_USERNAME === '(not set)' ? 'unset' : ''}">${APP_USERNAME}</span>
       </div>
       <div class="row">
-        <span class="label">PASSWORD</span>
-        <span class="value ${PASSWORD === '(not set)' ? 'unset' : ''}">${PASSWORD}</span>
+        <span class="label">APP_PASSWORD</span>
+        <span class="value ${APP_PASSWORD === '(not set)' ? 'unset' : ''}">${APP_PASSWORD}</span>
       </div>
     </div>
     <div class="footer">
@@ -136,6 +136,6 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
 	console.log(`Listening on :${PORT}`);
-	console.log(`USERNAME=${USERNAME}`);
-	console.log(`PASSWORD=${PASSWORD}`);
+	console.log(`APP_USERNAME=${APP_USERNAME}`);
+	console.log(`APP_PASSWORD=${APP_PASSWORD}`);
 });

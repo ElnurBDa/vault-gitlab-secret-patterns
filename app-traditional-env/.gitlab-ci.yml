@@ -12,8 +12,8 @@ deploy:
       set -e
       mkdir -p env-debug
       cd env-debug
-      echo "USERNAME=$APP_USERNAME" > .env
-      echo "PASSWORD=$APP_PASSWORD" >> .env
+      echo "APP_USERNAME=$APP_USERNAME" > .env
+      echo "APP_PASSWORD=$APP_PASSWORD" >> .env
       docker build -t env-debug:latest .
       docker rm -f env-debug 2>/dev/null || true
       docker run -d \

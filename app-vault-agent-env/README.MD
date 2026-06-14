@@ -6,13 +6,13 @@ docker build -t env-debug .
 docker run --env-file .env -p 80:80 env-debug
 
 # Or inline
-docker run -e USERNAME=admin -e PASSWORD=secret -p 80:80 env-debug
+docker run -e APP_USERNAME=admin -e APP_PASSWORD=secret -p 80:80 env-debug
 ```
 
 `.env`
 ```env
-USERNAME=admin
-PASSWORD=secret123
+APP_USERNAME=admin
+APP_PASSWORD=secret123
 ```
 
 Variables

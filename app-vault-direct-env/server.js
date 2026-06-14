@@ -12,25 +12,30 @@ if (!VAULT_ROLE_ID || !VAULT_SECRET_ID) {
 	process.exit(1);
 }
 
-async function getVaultToken() {
+let cache = { secret: null, expires: 0 };
+
+async function vaultLogin() {
 	const res = await fetch(`${VAULT_ADDR}/v1/auth/approle/login`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ role_id: VAULT_ROLE_ID, secret_id: VAULT_SECRET_ID }),
 	});
 	if (!res.ok) throw new Error(`Vault auth failed: ${res.status}`);
-	const data = await res.json();
-	return data.auth.client_token;
+	return (await res.json()).auth; // { client_token, lease_duration, ... }
 }
 
 async function getSecrets() {
-	const token = await getVaultToken();
+	// serve from cache until the token lease is nearly up - don't log in per request
+	if (cache.secret && Date.now() < cache.expires) return cache.secret;
+
+	const auth = await vaultLogin();
 	const res = await fetch(`${VAULT_ADDR}/v1/${VAULT_SECRET_PATH}`, {
-		headers: { 'X-Vault-Token': token },
+		headers: { 'X-Vault-Token': auth.client_token },
 	});
 	if (!res.ok) throw new Error(`Vault secret fetch failed: ${res.status}`);
-	const data = await res.json();
-	return data.data.data; // KV v2 nesting
+	cache.secret = (await res.json()).data.data; // KV v2 nesting
+	cache.expires = Date.now() + (auth.lease_duration - 60) * 1000; // refresh ~1 min early
+	return cache.secret;
 }
 
 app.get('/', async (req, res) => {
